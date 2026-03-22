@@ -321,7 +321,7 @@ except RuntimeError:
 
 # ── Results ───────────────────────────────────────────────────────────────────
 _log_file.close()
-print(f"\nOptimization log written → {LOG_PATH}  ({_iter_count[0]} iterations)")
+print(f"\nOptimization log written → {LOG_PATH}")
 
 sol_CL       = sol.value(aero["CL"])
 sol_CD       = sol.value(aero["CD"])
