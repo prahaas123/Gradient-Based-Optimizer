@@ -115,6 +115,110 @@ def compute_score(
 
     return score
 
+def report_best_design(log_path = LOG_PATH):
+    # Find best row
+    if not os.path.exists(log_path):
+        print(f"[report_best_design] Log file not found: {log_path}")
+        return
+ 
+    best_row = None
+    best_score = float("-inf")
+ 
+    with open(log_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                s = float(row["score"])
+            except (ValueError, KeyError):
+                continue
+            if s > best_score:
+                best_score = s
+                best_row = row
+ 
+    if best_row is None:
+        print("[report_best_design] No valid rows found in log.")
+        return
+ 
+    # Unpack geometry
+    sol_chords  = np.array([float(best_row[f"chord{k}"]) / 100.0 for k in range(N_SECTIONS)])
+    sol_twists  = np.array([float(best_row[f"twist{k}"])          for k in range(N_SECTIONS)])
+    sol_y_le    = np.array([float(best_row[f"y{k}"])     / 100.0 for k in range(N_SECTIONS)])
+    sol_x_le    = np.array([float(best_row[f"x{k}"])     / 100.0 for k in range(N_SECTIONS)])
+    sol_z_le    = np.array([float(best_row[f"z{k}"])     / 100.0 for k in range(N_SECTIONS)])
+ 
+    # Unpack aerodynamic quantities
+    sol_CL       = float(best_row["CL"])
+    sol_CD_total = float(best_row["CD_total"])   # already includes CD0
+    sol_Cm       = float(best_row["Cm"])
+    sol_Cm_CG    = float(best_row["Cm_CG"])
+    sol_AR       = float(best_row["AR"])
+    sol_L        = float(best_row["L_N"])
+    sol_Clb      = float(best_row["Clb"])
+    sol_Cnb      = float(best_row["Cnb"])
+    sol_alpha    = float(best_row["alpha"])
+ 
+    # Re-derive quantities
+    sol_S_ref    = float(best_row["S_ref_cm2"]) / 1e4   # cm² → m²
+    sol_S_wet    = 2.0 * sol_S_ref
+    sol_V_stall  = float(stall_speed(sol_S_ref, sol_CL))
+    sol_M_root   = float(root_bending_moment(sol_y_le, sol_chords, sol_CL))
+    sol_cg       = calc_cg(sol_y_le, sol_x_le, sol_chords)   # scalar (m)
+ 
+    # Print report
+    print("\n═══ BEST DESIGN ══════════════════════════")
+    print(f"  (score = {best_score:.4f})")
+    print(f"  Alpha          : {sol_alpha:.2f} °")
+    print(f"  CL             : {sol_CL:.4f}")
+    print(f"  CD (total)     : {sol_CD_total:.4f}")
+    print(f"  L/D            : {sol_CL / sol_CD_total:.3f}")
+    print(f"  Cm             : {sol_Cm:.4f}")
+    print(f"  Lift           : {sol_L:.3f} N  (required ≥ {W_TARGET} N)")
+    print(f"  Wing area      : {sol_S_ref * 1e4:.1f} cm²")
+    print(f"  Wetted area    : {sol_S_wet * 1e4:.1f} cm²")
+    print(f"  Aspect ratio   : {sol_AR:.2f}")
+    print(f"  Stall speed    : {sol_V_stall:.2f} m/s")
+    print(f"  Root bending   : {sol_M_root:.3f} N·m")
+    print(f"  Chords (cm)    : {np.round(sol_chords * 100, 1)}")
+    print(f"  Twists (°)     : {np.round(sol_twists, 2)}")
+    print(f"  Span (cm)      : {np.round(sol_y_le * 100, 1)}")
+    print(f"  Sweep x (cm)   : {np.round(sol_x_le * 100, 1)}")
+    print(f"  Dihedral (cm)  : {np.round(sol_z_le * 100, 1)}")
+    print(f"  x_CG (mm)      : {float(sol_cg) * 100:.1f} mm from ref")
+    print(f"  Static margin  : {SM_TARGET * 100:.1f}% MAC")
+    print(f"  Cm about CG    : {sol_Cm_CG:.6f}  (should be ~0)")
+    print(f"  Clb            : {sol_Clb:.4f} /rad  (want < 0, roll stable)")
+    print(f"  Cnb            : {sol_Cnb:.4f} /rad  (want > 0, yaw  stable)")
+    print("═════════════════════════════════════════════════")
+ 
+    compute_score(
+        sol_CL, sol_CD_total, sol_Cm_CG, sol_S_ref, sol_S_wet,
+        sol_x_le, sol_y_le, sol_z_le, sol_chords, N_SECTIONS,
+        Clb=sol_Clb, Cnb=sol_Cnb,
+        verbose=True,
+    )
+ 
+    # Build plane
+    sol_airplane = asb.Airplane(
+        name    = "Best Wing",
+        xyz_ref = [0.0, 0.0, 0.0],
+        wings   = [
+            asb.Wing(
+                name      = "Main Wing",
+                symmetric = True,
+                xsecs     = [
+                    asb.WingXSec(
+                        xyz_le  = [sol_x_le[i], sol_y_le[i], sol_z_le[i]],
+                        chord   = sol_chords[i],
+                        twist   = sol_twists[i],
+                        airfoil = asb.Airfoil("naca4415"),
+                    )
+                    for i in range(N_SECTIONS)
+                ],
+            )
+        ],
+    )
+    sol_airplane.draw()
+
 opti = asb.Opti()
 
 y_le = opti.variable(
@@ -323,73 +427,4 @@ except RuntimeError:
 _log_file.close()
 print(f"\nOptimization log written → {LOG_PATH}")
 
-sol_CL       = sol.value(aero["CL"])
-sol_CD       = sol.value(aero["CD"])
-sol_Cm       = sol.value(aero["Cm"])
-sol_chords   = sol.value(chords)
-sol_y_le     = sol.value(y_le)
-sol_S_ref    = sol.value(S_ref)
-sol_S_wet    = sol.value(S_wet)
-sol_AR       = sol.value(AR)
-sol_L        = sol.value(L)
-sol_CD_total = sol_CD + CD0
-sol_V_stall  = float(stall_speed(sol_S_ref, sol_CL))
-sol_M_root   = float(root_bending_moment(sol_y_le, sol_chords, sol_CL))
-
-print("\n═══ OPTIMAL WING ════════════════════════════════")
-print(f"  Alpha          : {sol.value(alpha):.2f} °")
-print(f"  CL             : {sol_CL:.4f}")
-print(f"  CD (total)     : {sol_CD_total:.4f}")
-print(f"  L/D            : {sol_CL / sol_CD_total:.3f}")
-print(f"  Cm             : {sol_Cm:.4f}")
-print(f"  Lift           : {sol_L:.3f} N  (required ≥ {W_TARGET} N)")
-print(f"  Wing area      : {sol_S_ref * 1e4:.1f} cm²")
-print(f"  Wetted area    : {sol_S_wet * 1e4:.1f} cm²")
-print(f"  Aspect ratio   : {sol_AR:.2f}")
-print(f"  Stall speed    : {sol_V_stall:.2f} m/s")
-print(f"  Root bending   : {sol_M_root:.3f} N·m")
-print(f"  Chords (cm)    : {np.round(sol_chords * 100, 1)}")
-print(f"  Twists (°)     : {np.round(sol.value(twists), 2)}")
-print(f"  Span (cm)      : {np.round(sol_y_le * 100, 1)}")
-print(f"  Sweep x (cm)   : {np.round(sol.value(x_le) * 100, 1)}")
-print(f"  Dihedral (cm)  : {np.round(sol.value(z_le) * 100, 1)}")
-print(f"  x_CG (mm)      : {sol.value(cg)*100:.1f} mm from ref")
-print(f"  Static margin  : {SM_TARGET*100:.1f}% MAC")
-print(f"  Cm about CG    : {sol.value(Cm_CG):.6f}  (should be ~0)")
-print(f"  Clb            : {sol.value(Clb):.4f} /rad  (want < 0, roll stable)")
-print(f"  Cnb            : {sol.value(Cnb):.4f} /rad  (want > 0, yaw  stable)")
-print("═════════════════════════════════════════════════")
-
-sol_Cm_CG = sol.value(Cm_CG)
-compute_score(
-    sol_CL, sol_CD_total, sol_Cm_CG, sol_S_ref, sol_S_wet,
-    sol.value(x_le), sol_y_le, sol.value(z_le), sol_chords, N_SECTIONS,
-    Clb=sol.value(Clb), Cnb=sol.value(Cnb),
-    verbose=True,
-)
-
-# Rebuild solution airplane
-sol_x_le   = sol.value(x_le)
-sol_z_le   = sol.value(z_le)
-sol_twists = sol.value(twists)
-
-sol_airplane = asb.Airplane(
-    name    = "Optimal Wing",
-    xyz_ref = [0.0, 0.0, 0.0],
-    wings   = [
-        asb.Wing(
-            name      = "Main Wing",
-            symmetric = True,
-            xsecs     = [
-                asb.WingXSec(
-                    xyz_le  = [sol_x_le[i], sol_y_le[i], sol_z_le[i]],
-                    chord   = sol_chords[i],
-                    twist   = sol_twists[i],
-                    airfoil = asb.Airfoil("naca4415"),
-                )
-                for i in range(N_SECTIONS)
-            ],
-        )
-    ],
-)
-sol_airplane.draw()
+report_best_design()
